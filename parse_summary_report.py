@@ -96,7 +96,6 @@ def parse_pdf(pdf_path: str) -> dict:
         "FBA transaction fee refunds",
         "Other transaction fees",
         "Other transaction fee refunds",
-        "FBA inventory and inbound services fees",
     ]
     shipping = Decimal("0")
     for item in shipping_items:
@@ -105,12 +104,20 @@ def parse_pdf(pdf_path: str) -> dict:
         if m:
             shipping += parse_amount(m.group(1))
 
+    # 仓储费用
+    storage = Decimal("0")
+    storage_item = "FBA inventory and inbound services fees"
+    pattern = rf"{re.escape(storage_item)}\s+(-?\d[\d,]*\.\d{{2}}|-?\d+)"
+    m = re.search(pattern, text, re.IGNORECASE)
+    if m:
+        storage += parse_amount(m.group(1))
+
     # 平台费用项目
     expenses_total = totals["Expenses"]
-    platform_fees = expenses_total - advertising - shipping
+    platform_fees = expenses_total - advertising - shipping - storage
 
     # 验证
-    expected_expenses = advertising + shipping + platform_fees
+    expected_expenses = advertising + shipping + storage + platform_fees
     diff = (expenses_total - expected_expenses).quantize(
         Decimal("0.001"), rounding=ROUND_HALF_UP
     )
@@ -128,6 +135,7 @@ def parse_pdf(pdf_path: str) -> dict:
         "平台扣减总费用": format_amount(totals["Expenses"]),
         "广告支出": format_amount(advertising),
         "运费支出": format_amount(shipping),
+        "仓储费用": format_amount(storage),
         "平台费用项目": format_amount(platform_fees),
     }
 
@@ -145,7 +153,7 @@ def main():
         "-folder", "--folder", required=True, help="包含PDF的文件夹路径"
     )
     parser.add_argument(
-        "-o", "--output", default="summary_report.xlsx", help="输出Excel文件名"
+        "-o", "--output", default=None, help="输出Excel文件名或路径，默认保存到PDF目录"
     )
     args = parser.parse_args()
 
@@ -179,6 +187,7 @@ def main():
                     "提现金额",
                     "广告支出",
                     "运费支出",
+                    "仓储费用",
                     "平台费用项目",
                 }
             )
@@ -202,7 +211,7 @@ def main():
         "平台扣减总费用",
     ]
     extra_columns = sorted(extra_keys)
-    detail_columns = ["广告支出", "运费支出", "平台费用项目"]
+    detail_columns = ["广告支出", "运费支出", "仓储费用", "平台费用项目"]
     all_columns = base_columns + extra_columns + detail_columns
 
     # 确保每行都有所有列
@@ -221,7 +230,10 @@ def main():
     for col in numeric_cols:
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    output_path = Path(args.output).expanduser().resolve()
+    if args.output:
+        output_path = Path(args.output).expanduser().resolve()
+    else:
+        output_path = folder / "summary_report.xlsx"
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name="汇总")
         worksheet = writer.sheets["汇总"]
