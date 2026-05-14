@@ -94,9 +94,22 @@ async def batch_parse(body: dict):
 - 初始化脚本应幂等（可重复执行）
 - 公司/店铺等基础数据应通过 `init_data.py` 统一管理
 
-### 3. 代码审查清单
+### 3. Vue Router 页面缓存
+**问题：** 切换路由页面后，原页面的数据会丢失（组件被销毁重建）。
+
+**正确做法：** Vue 3 中 `<keep-alive>` 需配合 `v-slot` 语法使用，直接包裹 `<router-view>` 不生效：
+```vue
+<router-view v-slot="{ Component }">
+  <keep-alive>
+    <component :is="Component" />
+  </keep-alive>
+</router-view>
+```
+
+### 4. 代码审查清单
 修改前端上传组件前检查：
 - [ ] 是否使用了函数式 ref 绑定？
 - [ ] 是否在 v-for 中使用了 ref？
 - [ ] 文件状态管理是否清晰？
 - [ ] 重复选择文件是否能正常更新？
+- [ ] 路由页面是否需要 keep-alive 缓存？

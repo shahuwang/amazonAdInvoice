@@ -6,10 +6,14 @@ Temu 账务明细解析器（支持全托管/半托管）
 
 import argparse
 import sys
+import warnings
 from pathlib import Path
 
 import pandas as pd
 from openpyxl.comments import Comment
+
+# 忽略 openpyxl 的默认样式警告
+warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
 
 REGIONS = ["欧区", "美区", "全球区"]
 

@@ -17,7 +17,7 @@ export const uploadApi = {
     headers: { 'Content-Type': 'multipart/form-data' }
   }),
   parse: (id) => api.post(`/uploads/${id}/parse`),
-  batchParse: (uploadIds) => api.post('/uploads/batch-parse', uploadIds),
+  batchParse: (uploadIds) => api.post('/uploads/batch-parse', {upload_ids: uploadIds}),
   getById: (id) => api.get(`/uploads/${id}`)
 }
 

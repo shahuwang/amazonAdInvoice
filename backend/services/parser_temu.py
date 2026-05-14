@@ -3,10 +3,14 @@ Temu 解析服务 - 复用 parse_temu_fund.py 核心逻辑
 支持文件对象输入，提供入库方法
 """
 
+import warnings
 import pandas as pd
 from pathlib import Path
 from typing import Dict, List, Tuple
 import io
+
+# 忽略 openpyxl 的默认样式警告
+warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
 
 # 从原脚本导入核心函数
 import sys
