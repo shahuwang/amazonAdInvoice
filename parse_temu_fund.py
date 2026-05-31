@@ -15,7 +15,42 @@ from openpyxl.comments import Comment
 # 忽略 openpyxl 的默认样式警告
 warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
 
-REGIONS = ["欧区", "美区", "全球区"]
+# 抑制 pandas fillna downcast 警告
+pd.set_option("future.no_silent_downcasting", True)
+
+REGIONS = ["欧区", "美区", "全球"]
+
+
+def find_region_file(folder: Path, region: str) -> Path:
+    """在目录中查找匹配区域的账单文件，支持关键词模糊匹配。"""
+    keywords = {
+        "欧区": ["欧区", "欧洲"],
+        "美区": ["美区", "美国"],
+        "全球": ["全球"],
+    }
+    # 获取目录下所有 xlsx 文件
+    files = list(folder.glob("*.xlsx"))
+    for kw in keywords.get(region, [region]):
+        for f in files:
+            if kw in f.name:
+                return f
+    return folder / f"{region}账务明细.xlsx"
+
+
+def _col_width(val, number_format=None):
+    if val is None:
+        return 0
+    if isinstance(val, (int, float)) and not isinstance(val, bool):
+        # 按显示格式计算宽度，避免 Python float 全精度导致过宽
+        if number_format and "0.00" in number_format:
+            s = f"{val:,.2f}"
+        elif isinstance(val, int):
+            s = str(val)
+        else:
+            s = f"{val:.4f}"
+    else:
+        s = str(val)
+    return sum(2 if ord(ch) > 127 else 1 for ch in s)
 
 
 def fmt_worksheet(ws, numeric_cols, df):
@@ -27,6 +62,18 @@ def fmt_worksheet(ws, numeric_cols, df):
             v = str(cell.value).replace(".", "", 1).replace("-", "", 1)
             if isinstance(cell.value, (int, float)) or v.isdigit():
                 cell.number_format = "0.00"
+
+    for c_idx in range(1, ws.max_column + 1):
+        max_w = 0
+        # 只采样表头 + 前 50 行数据，避免异常值把列宽撑得过大
+        check_rows = min(ws.max_row, 51)
+        for r_idx in range(1, check_rows + 1):
+            cell = ws.cell(row=r_idx, column=c_idx)
+            w = _col_width(cell.value, cell.number_format)
+            if w > max_w:
+                max_w = w
+        col_letter = ws.cell(row=1, column=c_idx).column_letter
+        ws.column_dimensions[col_letter].width = min(max(max_w + 2, 8), 30)
 
 
 def read_sheets(path: Path):
@@ -143,6 +190,10 @@ def build_pivot(df, comp_dfs, sku_sheets):
         pivot = pivot.merge(
             d.rename(columns={"赔付金额": short}), on=["SKU ID", "SKU货号"], how="outer"
         )
+        pivot[short] = pivot[short].fillna(0)
+
+    # 后续 merge（how="outer"）可能引入新 SKU，导致之前已填充的列重新出现 NaN
+    for short in list(sheet_map.values()):
         pivot[short] = pivot[short].fillna(0)
 
     comp_total = pd.DataFrame(columns=["SKU ID", "SKU货号", "总赔付金额"])
@@ -419,21 +470,119 @@ def seller_center_data(folder: Path):
     return fees, check, subsidy_adj, total_expense, comp_from_center
 
 
-def write_region_excel(p, m, out_path: Path):
-    text_cols = ("SKU ID", "SKU货号", "货品名称", "SKU属性")
+def append_region_excel(p, m, out_path: Path, company=None, shop=None):
+    """以追加模式写入区域汇总，避免同一店铺重复。"""
+    text_cols_map = {
+        "SKU回款汇总": {"公司名", "店铺名", "SKU ID", "SKU货号", "货品名称", "SKU属性"},
+        "SKU指标分析": {"公司名", "店铺名", "SKU ID", "SKU货号", "货品名称", "SKU属性"},
+    }
+
+    if company and shop:
+        p = p.copy()
+        m = m.copy()
+        p.insert(0, "店铺名", shop)
+        p.insert(0, "公司名", company)
+        m.insert(0, "店铺名", shop)
+        m.insert(0, "公司名", company)
+    sheets = {"SKU回款汇总": p, "SKU指标分析": m}
+
+    # 追加模式
+    if out_path.exists():
+        xl = pd.ExcelFile(str(out_path))
+        existing = {s: pd.read_excel(xl, sheet_name=s) for s in xl.sheet_names}
+
+        # 检查重复
+        if "SKU回款汇总" in existing:
+            df_check = existing["SKU回款汇总"]
+            if "公司名" in df_check.columns and "店铺名" in df_check.columns:
+                mask = (df_check["公司名"] == company) & (df_check["店铺名"] == shop)
+                if mask.any():
+                    return False  # 已存在，跳过
+
+        for name, df in sheets.items():
+            if name in existing:
+                old = existing[name]
+                # 统一列结构：缺失列填充 0，并按新数据列序输出
+                for col in df.columns:
+                    if col not in old.columns:
+                        old[col] = 0
+                for col in old.columns:
+                    if col not in df.columns:
+                        df[col] = 0
+                df = df[old.columns]
+                existing[name] = pd.concat([old, df], ignore_index=True)
+            else:
+                existing[name] = df
+    else:
+        existing = sheets
+
     with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
-        p.to_excel(writer, index=False, sheet_name="SKU回款汇总")
-        m.to_excel(writer, index=False, sheet_name="SKU指标分析")
-        fmt_worksheet(
-            writer.sheets["SKU回款汇总"],
-            [c for c in p.columns if c not in text_cols],
-            p,
-        )
-        fmt_worksheet(
-            writer.sheets["SKU指标分析"],
-            [c for c in m.columns if c not in text_cols],
-            m,
-        )
+        for name, df in existing.items():
+            df.to_excel(writer, index=False, sheet_name=name)
+            numeric_cols = [
+                c for c in df.columns if c not in text_cols_map.get(name, set())
+            ]
+            fmt_worksheet(writer.sheets[name], numeric_cols, df)
+    return True
+
+
+def append_summary(out_path: Path, company, shop, df_pivot, df_metrics, df_order):
+    sheets = {
+        "SKU回款汇总": df_pivot,
+        "SKU指标分析": df_metrics,
+        "订单收入汇总": df_order,
+    }
+    text_cols_map = {
+        "SKU回款汇总": {"公司名", "店铺名", "SKU ID", "SKU货号", "货品名称", "SKU属性"},
+        "SKU指标分析": {"公司名", "店铺名", "SKU ID", "SKU货号", "货品名称", "SKU属性"},
+        "订单收入汇总": {"公司名", "店铺名", "区域"},
+    }
+
+    if out_path.exists():
+        xl = pd.ExcelFile(str(out_path))
+        existing = {s: pd.read_excel(xl, sheet_name=s) for s in xl.sheet_names}
+
+        if "SKU回款汇总" in existing:
+            df_check = existing["SKU回款汇总"]
+            if "公司名" in df_check.columns and "店铺名" in df_check.columns:
+                mask = (df_check["公司名"] == company) & (df_check["店铺名"] == shop)
+                if mask.any():
+                    return False
+
+        for name, df in sheets.items():
+            if name in existing:
+                old = existing[name]
+                # 统一列结构：缺失列填充 0，并按新数据列序输出
+                for col in df.columns:
+                    if col not in old.columns:
+                        old[col] = 0
+                for col in old.columns:
+                    if col not in df.columns:
+                        df[col] = 0
+                df = df[old.columns]
+                existing[name] = pd.concat([old, df], ignore_index=True)
+            else:
+                existing[name] = df
+    else:
+        existing = sheets
+
+    with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
+        for name, df in existing.items():
+            df.to_excel(writer, index=False, sheet_name=name)
+            numeric_cols = [
+                c for c in df.columns if c not in text_cols_map.get(name, set())
+            ]
+            fmt_worksheet(writer.sheets[name], numeric_cols, df)
+            if name == "订单收入汇总":
+                ws = writer.sheets[name]
+                for col_idx, col_name in enumerate(df.columns, start=1):
+                    if col_name == "平台其他费用":
+                        ws.cell(row=1, column=col_idx).comment = Comment(
+                            "平台其他费用 = 总支出额 - 仓储综合服务费 - 物流费用 - 推广服务费",
+                            "系统",
+                        )
+                        break
+    return True
 
 
 def build_region_data(pivots, metrics, extras):
@@ -529,7 +678,7 @@ def reconcile(shop, check):
     return diff
 
 
-def build_order_income(region_metrics, shop_data):
+def build_order_income_long(region_data, shop_data, company, shop):
     names = [
         "订单数量",
         "销售数量",
@@ -565,91 +714,87 @@ def build_order_income(region_metrics, shop_data):
             return -d[k]
         return d.get(k, d.get(key_map.get(k, k), 0.0))
 
-    data = {"列名": names}
-    for col in ["店铺数据"] + [f"{r}数据" for r in REGIONS]:
-        src = (
-            shop_data if col == "店铺数据" else region_metrics[col.replace("数据", "")]
-        )
-        data[col] = [val(src, n) for n in names]
-    return pd.DataFrame(data)[["列名", "店铺数据"] + [f"{r}数据" for r in REGIONS]]
+    rows = []
+    row = {"公司名": company, "店铺名": shop, "区域": "店铺"}
+    for n in names:
+        row[n] = val(shop_data, n)
+    rows.append(row)
+
+    for r in REGIONS:
+        row = {"公司名": company, "店铺名": shop, "区域": r}
+        src = region_data[r]
+        for n in names:
+            row[n] = val(src, n)
+        rows.append(row)
+
+    return pd.DataFrame(rows)
 
 
-def write_shop_excel(sp, shop_metrics, df_order, out_path: Path):
-    text_cols = ("SKU ID", "SKU货号", "货品名称", "SKU属性")
-    with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
-        sp.to_excel(writer, index=False, sheet_name="SKU回款汇总")
-        shop_metrics.to_excel(writer, index=False, sheet_name="SKU指标分析")
-        df_order.to_excel(writer, index=False, sheet_name="订单收入汇总")
-        fmt_worksheet(
-            writer.sheets["SKU回款汇总"],
-            [c for c in sp.columns if c not in text_cols],
-            sp,
-        )
-        fmt_worksheet(
-            writer.sheets["SKU指标分析"],
-            [c for c in shop_metrics.columns if c not in text_cols],
-            shop_metrics,
-        )
-        fmt_worksheet(
-            writer.sheets["订单收入汇总"],
-            [c for c in df_order.columns if c != "列名"],
-            df_order,
-        )
-        for cell in writer.sheets["订单收入汇总"]["A"]:
-            if cell.value == "平台其他费用":
-                cell.comment = Comment(
-                    "平台其他费用 = 总支出额 - 仓储综合服务费 - 物流费用 - 推广服务费",
-                    "系统",
-                )
-                break
 
 
 def main():
     parser = argparse.ArgumentParser(description="解析 Temu 各区账务明细")
-    parser.add_argument("-folder", "--folder", required=True)
+    parser.add_argument("-folder", required=True, help="数据文件夹路径")
+    parser.add_argument("-company", required=True, help="公司名称")
+    parser.add_argument("-shop", required=True, help="店铺名称")
     args = parser.parse_args()
     folder = Path(args.folder).expanduser().resolve()
+    company = args.company.strip()
+    shop_name = args.shop.strip()
 
     if not folder.is_dir():
         print(f"[ERROR] 指定路径不是文件夹: {folder}")
         sys.exit(1)
 
-    missing = [f for r in REGIONS if not (folder / f"{r}账务明细.xlsx").exists()]
+    missing = [r for r in REGIONS if not find_region_file(folder, r).exists()]
     if missing:
         print("[ERROR] 文件夹中缺少以下必需的表格文件:")
         for f in missing:
             print(f"    - {f}")
         sys.exit(1)
 
-    out_dir = folder / "汇总输出"
+    out_dir = Path.cwd() / "temu汇总"
     out_dir.mkdir(exist_ok=True)
+    out_path = out_dir / "汇总.xlsx"
 
     pivots, metrics, extras = {}, {}, {}
     for r in REGIONS:
-        print(f"[INFO] 正在处理 {r} 数据: {r}账务明细.xlsx")
-        p, m, e = process_region(folder / f"{r}账务明细.xlsx")
+        region_path = find_region_file(folder, r)
+        print(f"[INFO] 正在处理 {r} 数据: {region_path.name}")
+        p, m, e = process_region(region_path)
         pivots[r] = p
         metrics[r] = m
         extras[r] = e
-        write_region_excel(p, m, out_dir / f"{r}汇总.xlsx")
+        appended = append_region_excel(p, m, out_dir / f"{r}汇总.xlsx", company, shop_name)
+        if not appended:
+            print(f"[WARN] {r}汇总.xlsx 中已存在 {company}/{shop_name} 的数据，跳过。")
 
-    print("[INFO] 正在生成 店铺汇总.xlsx ...")
+    print("[INFO] 正在生成店铺汇总数据 ...")
     shop_pivot, shop_metrics = merge_shop(list(pivots.values()), list(metrics.values()))
 
     region_data = enrich_region_calcs(build_region_data(pivots, metrics, extras))
     fees, check, subsidy_adj, sc_total, sc_comp = seller_center_data(folder)
-    shop = build_shop_data(region_data, fees, check, subsidy_adj, sc_total, sc_comp)
-    reconcile(shop, check)
+    shop_data = build_shop_data(region_data, fees, check, subsidy_adj, sc_total, sc_comp)
+    reconcile(shop_data, check)
 
-    df_order = build_order_income(region_data, shop)
+    for df in (shop_pivot, shop_metrics):
+        df.insert(0, "店铺名", shop_name)
+        df.insert(0, "公司名", company)
+
+    df_order = build_order_income_long(region_data, shop_data, company, shop_name)
+
     sp = (
         shop_pivot.drop(columns=["总赔付金额"])
         if "总赔付金额" in shop_pivot.columns
         else shop_pivot
     )
-    write_shop_excel(sp, shop_metrics, df_order, out_dir / "店铺汇总.xlsx")
 
-    print(f"已生成: {out_dir / '店铺汇总.xlsx'}")
+    ok = append_summary(out_path, company, shop_name, sp, shop_metrics, df_order)
+    if not ok:
+        print(f"[WARN] 汇总文件中已存在 {company}/{shop_name} 的数据，跳过写入。")
+    else:
+        print(f"[INFO] 已追加到汇总文件: {out_path.resolve()}")
+
     print(f"\n全部处理完成，输出目录: {out_dir.resolve()}")
 
 
