@@ -27,6 +27,7 @@ Thumbs.db
 
 # Project specific
 backend/uploads/
+frontend/dist/
 *.xlsx
 *.pdf
 !frontend/src/**/*.vue
