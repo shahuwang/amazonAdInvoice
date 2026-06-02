@@ -383,7 +383,8 @@ def merge_shop(pivot_list, metrics_list):
         mid = ["销售回款", "销售冲回"] + mid
     mp = mp[keys + mid + back]
 
-    am = pd.concat(metrics_list, ignore_index=True)
+    non_empty = [m for m in metrics_list if not m.empty]
+    am = pd.concat(non_empty, ignore_index=True) if non_empty else pd.DataFrame()
     sm = am.groupby(keys, as_index=False).sum(numeric_only=False)
     tmp = sm[keys].copy()
     tx = [c for c in mp.columns if c not in keys and c not in back]
@@ -409,7 +410,14 @@ def merge_shop(pivot_list, metrics_list):
 
 
 def seller_center_data(folder: Path):
-    path = folder / "卖家中心账务明细.xlsx"
+    files = list(folder.glob("*.xlsx"))
+    path = None
+    for f in files:
+        if "卖家中心" in f.name:
+            path = f
+            break
+    if path is None:
+        path = folder / "卖家中心账务明细.xlsx"
     fees = {
         "仓储综合服务费": 0.0,
         "EPR费用": 0.0,
@@ -510,7 +518,8 @@ def append_region_excel(p, m, out_path: Path, company=None, shop=None):
                     if col not in df.columns:
                         df[col] = 0
                 df = df[old.columns]
-                existing[name] = pd.concat([old, df], ignore_index=True)
+                to_concat = [x for x in [old, df] if not x.empty]
+                existing[name] = pd.concat(to_concat, ignore_index=True) if to_concat else pd.DataFrame()
             else:
                 existing[name] = df
     else:
@@ -518,6 +527,8 @@ def append_region_excel(p, m, out_path: Path, company=None, shop=None):
 
     with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
         for name, df in existing.items():
+            if df.empty:
+                continue
             df.to_excel(writer, index=False, sheet_name=name)
             numeric_cols = [
                 c for c in df.columns if c not in text_cols_map.get(name, set())
@@ -560,7 +571,8 @@ def append_summary(out_path: Path, company, shop, df_pivot, df_metrics, df_order
                     if col not in df.columns:
                         df[col] = 0
                 df = df[old.columns]
-                existing[name] = pd.concat([old, df], ignore_index=True)
+                to_concat = [x for x in [old, df] if not x.empty]
+                existing[name] = pd.concat(to_concat, ignore_index=True) if to_concat else pd.DataFrame()
             else:
                 existing[name] = df
     else:
@@ -568,6 +580,8 @@ def append_summary(out_path: Path, company, shop, df_pivot, df_metrics, df_order
 
     with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
         for name, df in existing.items():
+            if df.empty:
+                continue
             df.to_excel(writer, index=False, sheet_name=name)
             numeric_cols = [
                 c for c in df.columns if c not in text_cols_map.get(name, set())
