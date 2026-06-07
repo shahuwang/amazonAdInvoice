@@ -45,7 +45,7 @@ def parse_pdf(pdf_path: str) -> dict:
 
     # 账期月份
     activity_match = re.search(
-        r"Account activity from\s+([A-Za-z]+ \d{1,2},? \d{4}) \d{2}:\d{2} \w+ through",
+        r"(?:Account activity from|Actividad de la cuenta desde)\s+([A-Za-z]+ \d{1,2},? \d{4}) \d{2}:\d{2} \w+ (?:through|hasta)",
         text,
     )
     statement_month = None
@@ -60,17 +60,23 @@ def parse_pdf(pdf_path: str) -> dict:
                 continue
 
     # 币种
-    currency_match = re.search(r"All amounts in (\w+)", text)
+    currency_match = re.search(r"(?:All amounts in|Todos los importes en)\s*(\w+)", text)
     currency = currency_match.group(1) if currency_match else None
 
-    # Totals
+    KEY_MAP = {
+        "Income": "Income", "Ingresos": "Income",
+        "Expenses": "Expenses", "Gastos": "Expenses",
+        "Tax": "Tax", "Impuesto": "Tax",
+        "Transfers": "Transfers", "Transferencias": "Transfers",
+    }
     totals_pattern = re.compile(
-        r"^(Income|Expenses|Tax|Transfers)\b\s+.+?\s+(-?\d{1,3}(?:,\d{3})*\.\d{2}|-?\d+)\s*$",
+        r"^(Income|Ingresos|Expenses|Gastos|Tax|Impuesto|Transfers|Transferencias)\b\s+.+?\s+(-?\d{1,3}(?:,\d{3})*\.\d{2}|-?\d+)\s*$",
         re.MULTILINE | re.IGNORECASE,
     )
     totals = {}
     for m in totals_pattern.finditer(text):
-        key = m.group(1).strip().capitalize()
+        raw_key = m.group(1).strip().capitalize()
+        key = KEY_MAP.get(raw_key, raw_key)
         raw_val = m.group(2).strip()
         try:
             val = parse_amount(raw_val)
@@ -86,33 +92,33 @@ def parse_pdf(pdf_path: str) -> dict:
 
     # 广告支出
     adv_match = re.search(
-        r"Cost of Advertising\s+(-?\d[\d,]*\.\d{2}|-?\d+)", text, re.IGNORECASE
+        r"(?:Cost of Advertising|Costo de la publicidad)\s+(-?\d[\d,]*\.\d{2}|-?\d+)", text, re.IGNORECASE
     )
     advertising = parse_amount(adv_match.group(1)) if adv_match else Decimal("0")
 
     # 运费支出
-    shipping_items = [
-        "FBA transaction fees",
-        "FBA transaction fee refunds",
-        "Other transaction fees",
-        "Other transaction fee refunds",
+    shipping_patterns = [
+        r"(?:FBA transaction fees|Tarifas de transacción FBA)",
+        r"(?:FBA transaction fee refunds|Reembolsos de tarifas de transacción FBA)",
+        r"(?:Other transaction fees|Tarifas de otra transacción)",
+        r"(?:Other transaction fee refunds|Reembolsos de tarifas de otras transacciones)",
     ]
     shipping = Decimal("0")
-    for item in shipping_items:
-        pattern = rf"{re.escape(item)}\s+(-?\d[\d,]*\.\d{{2}}|-?\d+)"
-        m = re.search(pattern, text, re.IGNORECASE)
+    for pattern in shipping_patterns:
+        m = re.search(rf"{pattern}\s+(-?\d[\d,]*\.\d{{2}}|-?\d+)", text, re.IGNORECASE)
         if m:
             shipping += parse_amount(m.group(1))
 
     # 仓储费用
     storage = Decimal("0")
-    storage_item = "FBA inventory and inbound services fees"
-    pattern = rf"{re.escape(storage_item)}\s+(-?\d[\d,]*\.\d{{2}}|-?\d+)"
-    m = re.search(pattern, text, re.IGNORECASE)
+    m = re.search(
+        r"(?:FBA inventory and inbound services fees|Tarifas de inventario y de servicios de Logística de Amazon)\s+(-?\d[\d,]*\.\d{2}|-?\d+)",
+        text, re.IGNORECASE,
+    )
     if m:
         storage += parse_amount(m.group(1))
 
-    # 平台费用项目
+    # 平台其他扣费
     expenses_total = totals["Expenses"]
     platform_fees = expenses_total - advertising - shipping - storage
 
@@ -126,17 +132,19 @@ def parse_pdf(pdf_path: str) -> dict:
             f"验证失败: Expenses({format_amount(expenses_total)}) 不等于 细分之和({format_amount(expected_expenses)}), 差额 {format_amount(diff)}"
         )
 
+    net_revenue = totals["Income"] + totals["Expenses"]
     result = {
         "账期月份": statement_month or "",
         "币种": currency or "",
-        "营业收入": format_amount(totals["Income"]),
-        "税费": format_amount(totals["Tax"]),
         "提现金额": format_amount(-totals["Transfers"]),
+        "税费": format_amount(totals["Tax"]),
+        "营业收入": format_amount(totals["Income"]),
+        "净营收总额": format_amount(net_revenue),
         "平台扣减总费用": format_amount(totals["Expenses"]),
         "广告支出": format_amount(advertising),
         "运费支出": format_amount(shipping),
         "仓储费用": format_amount(storage),
-        "平台费用项目": format_amount(platform_fees),
+        "平台其他扣费": format_amount(platform_fees),
     }
 
     # 其他新增大项
@@ -182,13 +190,14 @@ def main():
                     "账期月份",
                     "币种",
                     "营业收入",
+                    "净营收总额",
                     "平台扣减总费用",
                     "税费",
                     "提现金额",
                     "广告支出",
                     "运费支出",
                     "仓储费用",
-                    "平台费用项目",
+                    "平台其他扣费",
                 }
             )
         except Exception as exc:
@@ -205,13 +214,14 @@ def main():
     base_columns = [
         "账期月份",
         "币种",
-        "营业收入",
-        "税费",
         "提现金额",
+        "税费",
+        "营业收入",
+        "净营收总额",
         "平台扣减总费用",
     ]
     extra_columns = sorted(extra_keys)
-    detail_columns = ["广告支出", "运费支出", "仓储费用", "平台费用项目"]
+    detail_columns = ["广告支出", "运费支出", "仓储费用", "平台其他扣费"]
     all_columns = base_columns + extra_columns + detail_columns
 
     # 确保每行都有所有列
@@ -233,7 +243,7 @@ def main():
     if args.output:
         output_path = Path(args.output).expanduser().resolve()
     else:
-        output_path = folder / "summary_report.xlsx"
+        output_path = folder / "收入汇总.xlsx"
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name="汇总")
         worksheet = writer.sheets["汇总"]
@@ -249,6 +259,17 @@ def main():
                         .isdigit()
                     ):
                         cell.number_format = "0.00"
+
+        for col_cells in worksheet.columns:
+            max_len = 0
+            col_letter = col_cells[0].column_letter
+            for cell in col_cells:
+                val = str(cell.value) if cell.value is not None else ""
+                # 中文字符按2倍宽度计算
+                length = sum(2 if ord(c) > 127 else 1 for c in val)
+                if length > max_len:
+                    max_len = length
+            worksheet.column_dimensions[col_letter].width = max_len + 3
 
     print(f"\n[INFO] Excel已输出: {output_path}")
 

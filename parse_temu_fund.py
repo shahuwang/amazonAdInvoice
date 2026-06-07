@@ -256,14 +256,14 @@ def build_metrics(df, comp_dfs):
         ["SKU ID", "SKU货号", "货品名称", "SKU属性"]
     ):
         seen.add((sku_id, sku_no))
-        back = g["交易类型"].isin(["销售回款", "非商责补贴"])
+        back = g["交易类型"] == "销售回款"
         refund = g["交易类型"] == "销售冲回"
         n_back = int(back.sum())
         n_refund = int(refund.sum())
         sales_val = float(g.loc[back, "金额"].sum())
-        sales_only = float(g[g["交易类型"] == "销售回款"]["金额"].sum())
+        sales_only = sales_val
         refund_val = abs(float(g.loc[refund, "金额"].sum()))
-        qty = float(g["数量"].sum()) if "数量" in g.columns else 0.0
+        qty = float(g.loc[back, "数量"].sum()) if "数量" in g.columns else 0.0
 
         comp = pd.concat(comp_dfs, ignore_index=True) if comp_dfs else None
         has_sku = comp is not None and {"SKU ID", "SKU货号"}.issubset(comp.columns)
@@ -357,14 +357,14 @@ def process_region(path: Path):
                 "赔付金额比例",
             ]
         )
-        return empty_pivot, empty_metrics, {}
+        return empty_pivot, empty_metrics, {}, pd.DataFrame()
 
     settle, extra = read_settlement(xl, is_half)
     comp_dfs, sku_sheets, extra_comp = read_compensation(xl, is_half)
     extra["赔付总额"] = extra_comp
     pivot = build_pivot(settle, comp_dfs, sku_sheets)
     metrics = build_metrics(settle, comp_dfs)
-    return pivot, metrics, extra
+    return pivot, metrics, extra, settle
 
 
 def merge_shop(pivot_list, metrics_list):
@@ -537,26 +537,26 @@ def append_region_excel(p, m, out_path: Path, company=None, shop=None):
     return True
 
 
-def append_summary(out_path: Path, company, shop, df_pivot, df_metrics, df_order):
+def append_summary(out_path: Path, company, shop, df_summary, df_expense, df_sku):
     sheets = {
-        "SKU回款汇总": df_pivot,
-        "SKU指标分析": df_metrics,
-        "订单收入汇总": df_order,
+        "店铺汇总数据": df_summary,
+        "店铺支出统计": df_expense,
+        "sku数据": df_sku,
     }
     text_cols_map = {
-        "SKU回款汇总": {"公司名", "店铺名", "SKU ID", "SKU货号", "货品名称", "SKU属性"},
-        "SKU指标分析": {"公司名", "店铺名", "SKU ID", "SKU货号", "货品名称", "SKU属性"},
-        "订单收入汇总": {"公司名", "店铺名", "区域"},
+        "店铺汇总数据": {"公司名称", "店铺名称", "区域"},
+        "店铺支出统计": {"公司名", "店铺"},
+        "sku数据": {"企业名", "店铺名", "SKU ID", "SKU货号", "货品名称", "SKU属性"},
     }
 
     if out_path.exists():
         xl = pd.ExcelFile(str(out_path))
         existing = {s: pd.read_excel(xl, sheet_name=s) for s in xl.sheet_names}
 
-        if "SKU回款汇总" in existing:
-            df_check = existing["SKU回款汇总"]
-            if "公司名" in df_check.columns and "店铺名" in df_check.columns:
-                mask = (df_check["公司名"] == company) & (df_check["店铺名"] == shop)
+        if "店铺汇总数据" in existing:
+            df_check = existing["店铺汇总数据"]
+            if "公司名称" in df_check.columns and "店铺名称" in df_check.columns:
+                mask = (df_check["公司名称"] == company) & (df_check["店铺名称"] == shop)
                 if mask.any():
                     return False
 
@@ -587,14 +587,22 @@ def append_summary(out_path: Path, company, shop, df_pivot, df_metrics, df_order
                 c for c in df.columns if c not in text_cols_map.get(name, set())
             ]
             fmt_worksheet(writer.sheets[name], numeric_cols, df)
-            if name == "订单收入汇总":
+            if name == "店铺汇总数据":
                 ws = writer.sheets[name]
                 for col_idx, col_name in enumerate(df.columns, start=1):
-                    if col_name == "平台其他费用":
+                    if col_name == "最终回款总额":
                         ws.cell(row=1, column=col_idx).comment = Comment(
-                            "平台其他费用 = 总支出额 - 仓储综合服务费 - 物流费用 - 推广服务费",
+                            "最终回款额 = 销售总额 - 退货总额 + 调整额 - 支出总额",
                             "系统",
                         )
+                        break
+            if name == "sku数据":
+                ws = writer.sheets[name]
+                for col_idx, col_name in enumerate(df.columns, start=1):
+                    if col_name == "退货率":
+                        for row_idx in range(2, len(df) + 2):
+                            cell = ws.cell(row=row_idx, column=col_idx)
+                            cell.number_format = "0.00%"
                         break
     return True
 
@@ -744,6 +752,136 @@ def build_order_income_long(region_data, shop_data, company, shop):
     return pd.DataFrame(rows)
 
 
+def build_expense_summary(region_data, shop_data, company, shop_name):
+    """构建店铺支出统计表"""
+    columns = [
+        "公司名",
+        "店铺",
+        "总支出额",
+        "仓储费",
+        "推广服务费",
+        "物流费用",
+        "EPR费用",
+        "售后费用",
+    ]
+    rows = [
+        {
+            "公司名": company,
+            "店铺": shop_name,
+            "总支出额": -shop_data.get("总支出额", 0),
+            "仓储费": -shop_data.get("仓储综合服务费", 0),
+            "推广服务费": -shop_data.get("推广服务费", 0),
+            "物流费用": -shop_data.get("物流费用", 0),
+            "EPR费用": -shop_data.get("EPR费用", 0),
+            "售后费用": -shop_data.get("赔付总额", 0),
+        }
+    ]
+    return pd.DataFrame(rows, columns=columns)
+
+
+def build_sku_data(df, company, shop_name):
+    """构建 sku 数据表"""
+    rows = []
+    for (sku_id, sku_no, name, attr), g in df.groupby(
+        ["SKU ID", "SKU货号", "货品名称", "SKU属性"]
+    ):
+        back = g["交易类型"] == "销售回款"
+        refund = g["交易类型"] == "销售冲回"
+        other = ~g["交易类型"].isin(["销售回款", "销售冲回"])
+
+        qty = float(g.loc[back, "数量"].sum()) if "数量" in g.columns else 0.0
+        sales_val = float(g.loc[back, "金额"].sum())
+        refund_val = float(g.loc[refund, "金额"].sum())
+        other_val = float(g.loc[other, "金额"].sum())
+
+        total_income = round(sales_val + refund_val + other_val, 2)
+        refund_rate = round(abs(refund_val) / sales_val, 4) if sales_val else 0.0
+        rows.append(
+            {
+                "企业名": company,
+                "店铺名": shop_name,
+                "SKU ID": sku_id,
+                "SKU货号": sku_no,
+                "货品名称": name,
+                "SKU属性": attr,
+                "销售数量": int(qty),
+                "销售总额": round(sales_val, 2),
+                "退货金额": round(refund_val, 2),
+                "退货率": refund_rate,
+                "其他收入": round(other_val, 2),
+                "总收入": total_income,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def build_shop_summary(region_data, shop_data, company, shop_name):
+    """构建店铺汇总数据表"""
+    columns = [
+        "公司名称",
+        "店铺名称",
+        "区域",
+        "总销售额",
+        "订单数量",
+        "销售数量",
+        "退货订单数",
+        "退货总额",
+        "运费回款",
+        "平台调整金额",
+        "总支出额",
+        "提现总额",
+        "最终回款总额",
+    ]
+
+    rows = []
+
+    # 店铺汇总行
+    platform_adj = (
+        shop_data.get("非商责补贴", 0)
+        + shop_data.get("调整额", 0)
+        - shop_data.get("非商责补贴调整", 0)
+    )
+
+    rows.append(
+        {
+            "公司名称": company,
+            "店铺名称": shop_name,
+            "区域": "店铺",
+            "总销售额": shop_data.get("销售回款总额", 0),
+            "订单数量": int(shop_data.get("订单数量", 0)),
+            "销售数量": int(shop_data.get("销售数量", 0)),
+            "退货订单数": int(shop_data.get("退货订单数", 0)),
+            "退货总额": -shop_data.get("退货总额", 0),
+            "运费回款": shop_data.get("运费回款", 0),
+            "平台调整金额": platform_adj,
+            "总支出额": -shop_data.get("总支出额", 0),
+            "提现总额": shop_data.get("提现总额", 0),
+            "最终回款总额": shop_data.get("净回款额", 0),
+        }
+    )
+
+    # 各区域行
+    for region in REGIONS:
+        rd = region_data[region]
+        rows.append(
+            {
+                "公司名称": company,
+                "店铺名称": shop_name,
+                "区域": region,
+                "总销售额": rd.get("销售回款总额", 0),
+                "订单数量": int(rd.get("订单数量", 0)),
+                "销售数量": int(rd.get("销售数量", 0)),
+                "退货订单数": int(rd.get("退货订单数", 0)),
+                "退货总额": -rd.get("退货总额", 0),
+                "运费回款": rd.get("运费回款", 0),
+                "平台调整金额": rd.get("非商责补贴", 0),
+                "总支出额": -rd.get("总支出额", 0),
+                "提现总额": rd.get("提现总额", 0),
+                "最终回款总额": rd.get("净回款额", 0),
+            }
+        )
+
+    return pd.DataFrame(rows, columns=columns)
 
 
 def main():
@@ -771,39 +909,33 @@ def main():
     out_dir.mkdir(exist_ok=True)
     out_path = out_dir / "汇总.xlsx"
 
-    pivots, metrics, extras = {}, {}, {}
+    pivots, metrics, extras, settles = {}, {}, {}, {}
     for r in REGIONS:
         region_path = find_region_file(folder, r)
         print(f"[INFO] 正在处理 {r} 数据: {region_path.name}")
-        p, m, e = process_region(region_path)
+        p, m, e, s = process_region(region_path)
         pivots[r] = p
         metrics[r] = m
         extras[r] = e
+        settles[r] = s
         appended = append_region_excel(p, m, out_dir / f"{r}汇总.xlsx", company, shop_name)
         if not appended:
             print(f"[WARN] {r}汇总.xlsx 中已存在 {company}/{shop_name} 的数据，跳过。")
 
     print("[INFO] 正在生成店铺汇总数据 ...")
-    shop_pivot, shop_metrics = merge_shop(list(pivots.values()), list(metrics.values()))
-
     region_data = enrich_region_calcs(build_region_data(pivots, metrics, extras))
     fees, check, subsidy_adj, sc_total, sc_comp = seller_center_data(folder)
     shop_data = build_shop_data(region_data, fees, check, subsidy_adj, sc_total, sc_comp)
     reconcile(shop_data, check)
 
-    for df in (shop_pivot, shop_metrics):
-        df.insert(0, "店铺名", shop_name)
-        df.insert(0, "公司名", company)
+    # 合并所有区域结算数据
+    all_settle = pd.concat([s for s in settles.values() if not s.empty], ignore_index=True)
+    df_sku = build_sku_data(all_settle, company, shop_name)
 
-    df_order = build_order_income_long(region_data, shop_data, company, shop_name)
+    df_summary = build_shop_summary(region_data, shop_data, company, shop_name)
+    df_expense = build_expense_summary(region_data, shop_data, company, shop_name)
 
-    sp = (
-        shop_pivot.drop(columns=["总赔付金额"])
-        if "总赔付金额" in shop_pivot.columns
-        else shop_pivot
-    )
-
-    ok = append_summary(out_path, company, shop_name, sp, shop_metrics, df_order)
+    ok = append_summary(out_path, company, shop_name, df_summary, df_expense, df_sku)
     if not ok:
         print(f"[WARN] 汇总文件中已存在 {company}/{shop_name} 的数据，跳过写入。")
     else:

@@ -45,7 +45,7 @@ def parse_pdf(file_obj) -> dict:
     
     # 账期月份
     activity_match = re.search(
-        r"Account activity from\s+([A-Za-z]+ \d{1,2},? \d{4}) \d{2}:\d{2} \w+ through",
+        r"(?:Account activity from|Actividad de la cuenta desde)\s+([A-Za-z]+ \d{1,2},? \d{4}) \d{2}:\d{2} \w+ (?:through|hasta)",
         text,
     )
     statement_month = None
@@ -60,17 +60,23 @@ def parse_pdf(file_obj) -> dict:
                 continue
     
     # 币种
-    currency_match = re.search(r"All amounts in (\w+)", text)
+    currency_match = re.search(r"(?:All amounts in|Todos los importes en)\s*(\w+)", text)
     currency = currency_match.group(1) if currency_match else None
     
-    # Totals
+    KEY_MAP = {
+        "Income": "Income", "Ingresos": "Income",
+        "Expenses": "Expenses", "Gastos": "Expenses",
+        "Tax": "Tax", "Impuesto": "Tax",
+        "Transfers": "Transfers", "Transferencias": "Transfers",
+    }
     totals_pattern = re.compile(
-        r"^(Income|Expenses|Tax|Transfers)\b\s+.+?\s+(-?\d{1,3}(?:,\d{3})*\.\d{2}|-?\d+)\s*$",
+        r"^(Income|Ingresos|Expenses|Gastos|Tax|Impuesto|Transfers|Transferencias)\b\s+.+?\s+(-?\d{1,3}(?:,\d{3})*\.\d{2}|-?\d+)\s*$",
         re.MULTILINE | re.IGNORECASE,
     )
     totals = {}
     for m in totals_pattern.finditer(text):
-        key = m.group(1).strip().capitalize()
+        raw_key = m.group(1).strip().capitalize()
+        key = KEY_MAP.get(raw_key, raw_key)
         raw_val = m.group(2).strip()
         try:
             val = parse_amount(raw_val)
@@ -78,7 +84,7 @@ def parse_pdf(file_obj) -> dict:
             continue
         if key not in totals:
             totals[key] = val
-    
+
     required_keys = {"Income", "Expenses", "Tax", "Transfers"}
     missing = required_keys - set(totals.keys())
     if missing:
@@ -86,29 +92,29 @@ def parse_pdf(file_obj) -> dict:
     
     # 广告支出
     adv_match = re.search(
-        r"Cost of Advertising\s+(-?\d[\d,]*\.\d{2}|-?\d+)", text, re.IGNORECASE
+        r"(?:Cost of Advertising|Costo de la publicidad)\s+(-?\d[\d,]*\.\d{2}|-?\d+)", text, re.IGNORECASE
     )
     advertising = parse_amount(adv_match.group(1)) if adv_match else Decimal("0")
     
     # 运费支出
-    shipping_items = [
-        "FBA transaction fees",
-        "FBA transaction fee refunds",
-        "Other transaction fees",
-        "Other transaction fee refunds",
+    shipping_patterns = [
+        r"(?:FBA transaction fees|Tarifas de transacción FBA)",
+        r"(?:FBA transaction fee refunds|Reembolsos de tarifas de transacción FBA)",
+        r"(?:Other transaction fees|Tarifas de otra transacción)",
+        r"(?:Other transaction fee refunds|Reembolsos de tarifas de otras transacciones)",
     ]
     shipping = Decimal("0")
-    for item in shipping_items:
-        pattern = rf"{re.escape(item)}\s+(-?\d[\d,]*\.\d{{2}}|-?\d+)"
-        m = re.search(pattern, text, re.IGNORECASE)
+    for pattern in shipping_patterns:
+        m = re.search(rf"{pattern}\s+(-?\d[\d,]*\.\d{{2}}|-?\d+)", text, re.IGNORECASE)
         if m:
             shipping += parse_amount(m.group(1))
     
     # 仓储费用
     storage = Decimal("0")
-    storage_item = "FBA inventory and inbound services fees"
-    pattern = rf"{re.escape(storage_item)}\s+(-?\d[\d,]*\.\d{{2}}|-?\d+)"
-    m = re.search(pattern, text, re.IGNORECASE)
+    m = re.search(
+        r"(?:FBA inventory and inbound services fees|Tarifas de inventario y de servicios de Logística de Amazon)\s+(-?\d[\d,]*\.\d{2}|-?\d+)",
+        text, re.IGNORECASE,
+    )
     if m:
         storage += parse_amount(m.group(1))
     
