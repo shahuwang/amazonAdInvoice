@@ -124,6 +124,26 @@ def read_settlement(xl, is_half: bool):
     return df, {}
 
 
+def _fix_compensation_header(df):
+    """Temu 赔付 sheet 可能是双行表头：第一行为分组标题，第二行为真实字段名。
+    如果第一行数据中出现 'SKU ID'，则用该行补齐真实列名并剔除。"""
+    if df.empty:
+        return df
+    first_row = df.iloc[0].astype(str)
+    if "SKU ID" not in first_row.values:
+        return df
+    new_cols = []
+    for i, c in enumerate(df.columns):
+        val = first_row.iloc[i]
+        if val and val.lower() != "nan" and val != "None":
+            new_cols.append(val)
+        else:
+            new_cols.append(str(c))
+    df = df.iloc[1:].reset_index(drop=True)
+    df.columns = new_cols
+    return df
+
+
 def read_compensation(xl, is_half: bool):
     comp_dfs = []
     sku_sheets = {}
@@ -132,6 +152,7 @@ def read_compensation(xl, is_half: bool):
         sheets = [s for s in xl.sheet_names if "支出-履约违规" in s]
         for s in sheets:
             df = pd.read_excel(xl, sheet_name=s)
+            df = _fix_compensation_header(df)
             if "支出金额" not in df.columns:
                 continue
             df["赔付金额"] = pd.to_numeric(df["支出金额"], errors="coerce").fillna(0)
@@ -150,20 +171,27 @@ def read_compensation(xl, is_half: bool):
     ]
     for s in sheets:
         df = pd.read_excel(xl, sheet_name=s)
+        df = _fix_compensation_header(df)
         if "赔付金额" not in df.columns:
             continue
         df["赔付金额"] = pd.to_numeric(df["赔付金额"], errors="coerce").fillna(0)
         for col in ["SKU ID", "SKU货号"]:
-            df[col] = df[col].astype(str).str.strip()
-        comp_dfs.append(df[["SKU ID", "SKU货号", "赔付金额"]])
-        sku_sheets[s] = (
-            df.groupby(["SKU ID", "SKU货号"])["赔付金额"].sum().reset_index()
-        )
-        info = df[
-            [c for c in ["SKU ID", "SKU货号", "货品名称", "SKU属性"] if c in df.columns]
-        ]
-        if not info.empty:
-            sku_sheets[f"{s}_info"] = info.drop_duplicates(subset=["SKU ID", "SKU货号"])
+            if col in df.columns:
+                df[col] = df[col].astype(str).str.strip().replace("nan", "")
+        sku_cols = [c for c in ["SKU ID", "SKU货号"] if c in df.columns]
+        if sku_cols:
+            comp_dfs.append(df[sku_cols + ["赔付金额"]])
+            sku_sheets[s] = (
+                df.groupby(sku_cols)["赔付金额"].sum().reset_index()
+            )
+            info = df[
+                [c for c in ["SKU ID", "SKU货号", "货品名称", "SKU属性"] if c in df.columns]
+            ]
+            if not info.empty:
+                sku_sheets[f"{s}_info"] = info.drop_duplicates(subset=sku_cols)
+        else:
+            # 没有 SKU 维度时只保留赔付金额
+            comp_dfs.append(df[["赔付金额"]])
     return comp_dfs, sku_sheets, 0.0
 
 
